@@ -7,12 +7,11 @@ import {
 
 const WS_URL = "wss://irc-ws.chat.twitch.tv:443";
 
-export class TwitchIRC extends Context.Tag("TwitchIRC")<
-  TwitchIRC,
-  {
-    readonly messages: Stream.Stream<TwitchMessage, InvalidTwitchMessage>;
-  }
->() {}
+interface ITwitchIRC {
+  readonly messages: Stream.Stream<TwitchMessage, InvalidTwitchMessage>;
+}
+
+export class TwitchIRC extends Context.Tag("TwitchIRC")<TwitchIRC, ITwitchIRC>() {}
 
 const makeTwitchChatService = (channel: string) =>
   Effect.gen(function* () {
@@ -30,6 +29,10 @@ const makeTwitchChatService = (channel: string) =>
     yield* Effect.sync(() => {
       socket.onerror = (err) => {
         Effect.logError("WebSocket error:", err);
+      };
+
+      socket.onclose = (event) => {
+        Effect.logError("Websocket disconnected: ", event);
       };
 
       socket.onmessage = (event) => {

@@ -1,33 +1,41 @@
 import { Effect, Context, Layer } from "effect";
 import { eq, sql, and, desc } from "drizzle-orm";
-import { messagesTable, chattersTable, channelsTable } from "../db/schema.ts";
+import { messagesTable, chattersTable, streamersTable } from "../db/schema.ts";
 import type { TwitchMessage } from "../util/messageparser.ts";
 import { Database, DatabaseError } from "./Database.ts";
 
+interface IChatterService {
+  readonly upsertChatter: (
+    streamerTwitchId: string,
+    twitchId: string,
+    username: string,
+  ) => Effect.Effect<{ id: string }, DatabaseError>;
+
+  readonly insertMessage: (
+    streamerTwitchId: string,
+    userId: string,
+    message: TwitchMessage,
+    timestamp?: string,
+  ) => Effect.Effect<void, DatabaseError>;
+
+  readonly getChatterChatMessages: (
+    streamerTwitchId: string,
+    userTwitchId: string,
+    limit?: number,
+    offset?: number,
+  ) => Effect.Effect<
+    ReadonlyArray<{
+      readonly id: string;
+      readonly message: string;
+      readonly timestamp: string;
+    }>,
+    DatabaseError
+  >;
+}
+
 export class ChatterService extends Context.Tag("ChatterService")<
   ChatterService,
-  {
-    readonly upsertChatter: (
-      channelId: string,
-      twitchId: string,
-      username: string,
-    ) => Effect.Effect<{ id: string }, DatabaseError>;
-    readonly insertMessage: (
-      channelId: string,
-      userId: string,
-      message: TwitchMessage,
-      twitchUserId: string,
-    ) => Effect.Effect<void, DatabaseError>;
-    readonly getChatterChatMessages: (
-      channelId: string,
-      twitchId: string,
-      limit?: number,
-      offset?: number,
-    ) => Effect.Effect<
-      ReadonlyArray<{ readonly id: string; readonly message: string; readonly timestamp: string }>,
-      DatabaseError
-    >;
-  }
+  IChatterService
 >() {}
 
 export const ChatterServiceLive = Layer.effect(
@@ -36,50 +44,61 @@ export const ChatterServiceLive = Layer.effect(
     const db = yield* Database;
 
     return ChatterService.of({
-      upsertChatter: (channelId, userId, username) =>
+      upsertChatter: (streamerTwitchId, userTwitchId, username) =>
         Effect.tryPromise({
           try: async () => {
             const result = await db
               .insert(chattersTable)
-              .values({ id: crypto.randomUUID(), twitchId: userId, channelId, username })
+              .values({
+                id: crypto.randomUUID(),
+                userTwitchId: userTwitchId,
+                streamerTwitchId: streamerTwitchId,
+                username,
+              })
               .onConflictDoUpdate({
-                target: [chattersTable.twitchId, chattersTable.channelId],
+                target: [chattersTable.userTwitchId, chattersTable.streamerTwitchId],
                 set: { messageCount: sql`${chattersTable.messageCount} + 1` },
               })
               .returning({ id: chattersTable.id });
 
             await db
-              .update(channelsTable)
-              .set({ totalMessages: sql`${channelsTable.totalMessages} + 1` })
-              .where(eq(channelsTable.twitchId, channelId));
+              .update(streamersTable)
+              .set({ totalMessages: sql`${streamersTable.totalMessages} + 1` })
+              .where(eq(streamersTable.twitchId, streamerTwitchId));
 
             return result[0]!;
           },
           catch: (e) => new DatabaseError({ reason: "Failed to upsert chatter", cause: e }),
         }),
 
-      insertMessage: (channelId, userId, message, twitchUserId) =>
+      insertMessage: (channelId, userId, message, timestamp) =>
         Effect.tryPromise({
           try: async () =>
-            db.insert(messagesTable).values({
-              id: crypto.randomUUID(),
-              channelId,
+            await db.insert(messagesTable).values({
+              id: message.tags.id,
+              streamerTwitchId: channelId,
               userId,
-              twitchId: twitchUserId,
+              userTwitchId: message.tags.userId,
               message: message.message,
-              timestamp: new Date().toISOString(),
+              timestamp: timestamp ?? new Date().toISOString(),
+              badgeInfo: message.tags.badgeInfo,
+              badges: message.tags.badges,
+              color: message.tags.color,
             }),
           catch: (e) => new DatabaseError({ reason: "Failed to insert message", cause: e }),
         }).pipe(Effect.asVoid),
 
-      getChatterChatMessages: (channelId, twitchId, limit = 100, offset = 0) =>
+      getChatterChatMessages: (streamerTwitchId, userTwitchId, limit = 100, offset = 0) =>
         Effect.tryPromise({
           try: async () =>
-            db
+            await db
               .select()
               .from(messagesTable)
               .where(
-                and(eq(messagesTable.channelId, channelId), eq(messagesTable.twitchId, twitchId)),
+                and(
+                  eq(messagesTable.streamerTwitchId, streamerTwitchId),
+                  eq(messagesTable.userTwitchId, userTwitchId),
+                ),
               )
               .orderBy(desc(messagesTable.timestamp))
               .limit(limit)
